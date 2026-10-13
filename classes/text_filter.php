@@ -506,74 +506,82 @@ class text_filter extends \core_filters\text_filter {
         }
 
         if ($jsinit) {
-
-            $sectionmap = $this->map_sections_to_ids();
-            $sectionjson = json_encode($sectionmap);
-
-            // Possible course cache build recursion avoidance, by adding the course if to a static array.
+            // Reentrancy guard: building the maps below (particularly reading cm_info::uservisible)
+            // can trigger filter setup again for this same course (e.g. via a profile-field
+            // availability check calling format_string()), which would otherwise recurse back into
+            // this whole block while it is still running. The is_annotating() check near the top of
+            // this method already bails out for recursive calls, so starting annotation here (instead
+            // of only around annotation_maps() below) makes that guard cover the map building too.
             self::start_annotating($COURSE->id);
-            $annotationmaps = json_encode(local_content::annotation_maps($COURSE->id));
-            self::end_annotating($COURSE->id);
 
-            require_once($CFG->libdir.'/filelib.php');
+            try {
+                $sectionmap = $this->map_sections_to_ids();
+                $sectionjson = json_encode($sectionmap);
 
-            // Note, we only have to build maps for modules that don't pass their file containing content
-            // through the filter.
-            $modulefilemapping = $this->map_resource_file_paths_to_pathhash($COURSE);
-            $assignmentmap = $this->map_assignment_file_paths_to_pathhash();
-            $forummap = $this->map_forum_attachment_file_paths_to_pathhash();
-            $foldermap = $this->map_folder_file_paths_to_pathhash();
-            $glossarymap = $this->map_glossary_file_paths_to_pathhash();
-            $lessonmap = $this->map_lesson_file_paths_to_pathhash();
-            $jwt = \filter_ally\local\jwthelper::get_token($USER, $COURSE->id);
-            $coursecontext = context_course::instance($COURSE->id);
-            $canviewfeedback = has_capability('filter/ally:viewfeedback', $coursecontext);
-            $candownload = has_capability('filter/ally:viewdownload', $coursecontext);
+                $annotationmaps = json_encode(local_content::annotation_maps($COURSE->id));
 
-            $modulemaps = [
-                'file_resources' => $modulefilemapping,
-                'assignment_files' => $assignmentmap,
-                'forum_files' => $forummap,
-                'folder_files' => $foldermap,
-                'glossary_files' => $glossarymap,
-                'lesson_files' => $lessonmap,
-            ];
-            $filejson = json_encode($modulemaps);
+                require_once($CFG->libdir . '/filelib.php');
 
-            $script = <<<EOF
-            <script>
-                var ally_module_maps = $filejson;
-                var ally_section_maps = $sectionjson;
-                var ally_annotation_maps = $annotationmaps;
-            </script>
+                // Note, we only have to build maps for modules that don't pass their file containing content
+                // through the filter.
+                $modulefilemapping = $this->map_resource_file_paths_to_pathhash($COURSE);
+                $assignmentmap = $this->map_assignment_file_paths_to_pathhash();
+                $forummap = $this->map_forum_attachment_file_paths_to_pathhash();
+                $foldermap = $this->map_folder_file_paths_to_pathhash();
+                $glossarymap = $this->map_glossary_file_paths_to_pathhash();
+                $lessonmap = $this->map_lesson_file_paths_to_pathhash();
+                $jwt = \filter_ally\local\jwthelper::get_token($USER, $COURSE->id);
+                $coursecontext = context_course::instance($COURSE->id);
+                $canviewfeedback = has_capability('filter/ally:viewfeedback', $coursecontext);
+                $candownload = has_capability('filter/ally:viewdownload', $coursecontext);
+
+                $modulemaps = [
+                    'file_resources' => $modulefilemapping,
+                    'assignment_files' => $assignmentmap,
+                    'forum_files' => $forummap,
+                    'folder_files' => $foldermap,
+                    'glossary_files' => $glossarymap,
+                    'lesson_files' => $lessonmap,
+                ];
+                $filejson = json_encode($modulemaps);
+
+                $script = <<<EOF
+                <script>
+                    var ally_module_maps = $filejson;
+                    var ally_section_maps = $sectionjson;
+                    var ally_annotation_maps = $annotationmaps;
+                </script>
 EOF;
 
-            if (!isset($CFG->additionalhtmlfooter)) {
-                $CFG->additionalhtmlfooter = '';
+                if (!isset($CFG->additionalhtmlfooter)) {
+                    $CFG->additionalhtmlfooter = '';
+                }
+                // Note, we have to put the module maps into the footer instead of passing them into the amd module as an
+                // argument. If you pass large amounts of data into the amd arguments then it throws a debug error.
+                $CFG->additionalhtmlfooter .= $script;
+
+                $config = get_config('tool_ally');
+                // We only want to send these config vars - we don't want to be sending security sensitive stuff like the shared secret!
+                $configvars = (object) [
+                    'adminurl' => !empty($config->adminurl) ? $config->adminurl : null,
+                    'pushurl' => !empty($config->pushurl) ? $config->pushurl : null,
+                    'clientid' => !empty($config->clientid) ? $config->clientid : null,
+                    'moodleversion' => $CFG->version,
+                ];
+
+                $params = new stdClass();
+                if (strpos($PAGE->pagetype, 'mod-lesson-view') !== false) {
+                    $params = $this->get_mod_lesson_params();
+                } else if (strpos($PAGE->pagetype, 'mod-book') !== false && $PAGE->pagetype !== 'mod-book-edit') {
+                    $params = $this->get_mod_book_params();
+                }
+
+                $amdargs = [$jwt, $configvars, $canviewfeedback, $candownload, $COURSE->id, $params];
+                $page->requires->js_call_amd('filter_ally/main', 'init', $amdargs);
+                $jsinitialised = true;
+            } finally {
+                self::end_annotating($COURSE->id);
             }
-            // Note, we have to put the module maps into the footer instead of passing them into the amd module as an
-            // argument. If you pass large amounts of data into the amd arguments then it throws a debug error.
-            $CFG->additionalhtmlfooter .= $script;
-
-            $config = get_config('tool_ally');
-            // We only want to send these config vars - we don't want to be sending security sensitive stuff like the shared secret!
-            $configvars = (object) [
-                'adminurl' => !empty($config->adminurl) ? $config->adminurl : null,
-                'pushurl' => !empty($config->pushurl) ? $config->pushurl : null,
-                'clientid' => !empty($config->clientid) ? $config->clientid : null,
-                'moodleversion' => $CFG->version,
-            ];
-
-            $params = new stdClass();
-            if (strpos($PAGE->pagetype, 'mod-lesson-view') !== false) {
-                $params = $this->get_mod_lesson_params();
-            } else if (strpos($PAGE->pagetype, 'mod-book') !== false && $PAGE->pagetype !== 'mod-book-edit') {
-                $params = $this->get_mod_book_params();
-            }
-
-            $amdargs = [$jwt, $configvars, $canviewfeedback, $candownload, $COURSE->id, $params];
-            $page->requires->js_call_amd('filter_ally/main', 'init', $amdargs);
-            $jsinitialised = true;
         }
     }
 
