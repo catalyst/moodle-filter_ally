@@ -63,7 +63,7 @@ final class filter_test extends \advanced_testcase {
 
     /**
      * Profile availability on a menu-type custom field must not crash filter setup via reentrancy.
-     * @covers \filter_ally\filter::setup
+     * @covers \filter_ally\text_filter::setup
      * @runInSeparateProcess
      */
     public function test_setup_does_not_recurse_via_profile_availability(): void {
