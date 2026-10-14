@@ -61,6 +61,50 @@ final class filter_test extends \advanced_testcase {
         $this->assertStringContainsString('ally_section_maps', $CFG->additionalhtmlfooter);
     }
 
+    /**
+     * Profile availability on a menu-type custom field must not crash filter setup via reentrancy.
+     * @covers \filter_ally\text_filter::setup
+     * @runInSeparateProcess
+     */
+    public function test_setup_does_not_recurse_via_profile_availability(): void {
+        global $DB, $PAGE, $CFG, $COURSE;
+
+        $category = $DB->insert_record('user_info_category', ['name' => 'Test category', 'sortorder' => 1]);
+        $DB->insert_record('user_info_field', [
+            'shortname' => 'studentteacher', 'name' => 'Student/Teacher', 'datatype' => 'text',
+            'categoryid' => $category, 'param1' => '', 'param2' => '', 'param3' => '',
+        ]);
+        $DB->insert_record('user_info_field', [
+            'shortname' => 'funding', 'name' => 'Funding', 'datatype' => 'menu',
+            'categoryid' => $category, 'param1' => "OptionA\nOptionB", 'param2' => '', 'param3' => '',
+        ]);
+        \availability_profile\condition::wipe_static_cache();
+
+        // The ally filter must also apply to strings (not just content) for format_string() to
+        // trigger filter setup while rendering the menu field's options below.
+        set_config('stringfilters', 'ally');
+        set_config('filterall', 1);
+
+        $course = $this->getDataGenerator()->create_course(['enablecompletion' => 1]);
+        $student = $this->getDataGenerator()->create_and_enrol($course, 'student');
+        $this->setUser($student);
+
+        $availability = json_encode((object) [
+            'op' => '&', 'c' => [(object) ['type' => 'profile', 'op' => 'contains', 'cf' => 'studentteacher', 'v' => 'student']],
+            'showc' => [true],
+        ]);
+        $this->getDataGenerator()->create_module('resource', ['course' => $course->id], ['availability' => $availability]);
+
+        $CFG->additionalhtmlfooter = '';
+        $COURSE = $course;
+        $PAGE->set_pagetype('course-view');
+        $PAGE->set_url('/course/view.php', ['id' => $course->id]);
+
+        $this->call_filter_setup();
+
+        $this->assertStringContainsString('ally_section_maps', $CFG->additionalhtmlfooter);
+    }
+
     public function test_is_course_page(): void {
         global $PAGE, $CFG;
 
